@@ -188,7 +188,7 @@ FUNCTION programPath RETURNS CHARACTER
                          VIEW-AS TEXT SIZE 140 BY 1
     "MenuPath is the label breadcrumb. MenuCodePath is the same path in menu codes." AT ROW 10.6 COL 3
                          VIEW-AS TEXT SIZE 140 BY 1
-    "The folder is checked when you leave the field. Extract runs only when that folder exists." AT ROW 11.8 COL 3
+    "The folder is checked when you leave the field. Change it there if that folder does not exist." AT ROW 11.8 COL 3
                          VIEW-AS TEXT SIZE 140 BY 1
      WITH SIDE-LABELS THREE-D
      AT COL 1 ROW 1 SCROLLABLE
@@ -224,21 +224,19 @@ FUNCTION programPath RETURNS CHARACTER
 
     glCheckingDir = TRUE.
     cReason = outputDirStatus(INPUT cFile:SCREEN-VALUE, OUTPUT cClean).
+    glCheckingDir = FALSE.
     IF cReason = "":U THEN
     DO:
       ASSIGN
         cFile              = cClean
-        cFile:SCREEN-VALUE = cClean
-        BuExtract:SENSITIVE = TRUE.
-      glCheckingDir = FALSE.
+        cFile:SCREEN-VALUE = cClean.
       RETURN.
     END.
 
-    ASSIGN BuExtract:SENSITIVE = FALSE.
+    /* Stay in the field so the folder can be changed. The dialog stays open. */
     MESSAGE cReason SKIP
             cFile:SCREEN-VALUE
         VIEW-AS ALERT-BOX ERROR BUTTONS OK.
-    glCheckingDir = FALSE.
     RETURN NO-APPLY.
   END.
 
@@ -273,11 +271,10 @@ FUNCTION programPath RETURNS CHARACTER
       RETURN NO-APPLY.
     END.
 
-    /* The leave trigger already checked this. Check again so Extract cannot run on a bad folder. */
+    /* Checked here as well, then the user is put back in the folder field to change it. */
     ASSIGN cReason = outputDirStatus(INPUT cFile, OUTPUT cDir).
     IF cReason <> "":U THEN
     DO:
-      ASSIGN BuExtract:SENSITIVE = FALSE.
       MESSAGE cReason SKIP
               cFile
           VIEW-AS ALERT-BOX ERROR BUTTONS OK.
@@ -348,33 +345,15 @@ FUNCTION programPath RETURNS CHARACTER
   IF cMipLog <> "":U THEN
     ASSIGN cMipLog = cMipLog + CHR(92) + "log":U.
 
-  /* A value is checked as soon as the field has one, and again when you leave it. */
-  IF cMipLog <> "":U
-     AND outputDirStatus(INPUT cMipLog, OUTPUT cTargetDir) = "":U THEN
-    ASSIGN cFile = cTargetDir.
+  /* Show the dialog first. The folder is checked when the user leaves the field. */
+  IF cMipLog <> "":U THEN
+    ASSIGN cFile = dirWithSlash(cMipLog).
   ELSE
-  IF outputDirStatus(INPUT SESSION:TEMP-DIRECTORY, OUTPUT cTargetDir) = "":U THEN
-  DO:
-    ASSIGN cFile = cTargetDir.
-    IF cMipLog <> "":U THEN
-      MESSAGE "The Q&D Fix Directory is not a folder this session can write.":U SKIP
-              "Output Directory starts in the session temp directory.":U SKIP
-              "Change it if the CSV files should go somewhere else.":U
-          VIEW-AS ALERT-BOX INFO BUTTONS OK.
-  END.
-  ELSE
-    ASSIGN cFile = "".
+    ASSIGN cFile = dirWithSlash(SESSION:TEMP-DIRECTORY).
 
   ENABLE ALL WITH FRAME main-frame.
   DISPLAY cFile cRootMenu WITH FRAME main-frame.
-  ASSIGN BuExtract:SENSITIVE = (cFile <> "":U).
   FRAME main-frame:DEFAULT-BUTTON = BuExtract:HANDLE IN FRAME main-frame.
-  IF cFile = "":U THEN
-  DO:
-    MESSAGE "Enter a folder that exists. Extract stays unavailable until a file can be created there.":U
-        VIEW-AS ALERT-BOX ERROR BUTTONS OK.
-    APPLY "ENTRY" TO cFile IN FRAME main-frame.
-  END.
 
   WAIT-FOR "GO" OF FRAME main-frame.
 
@@ -850,17 +829,18 @@ FUNCTION outputDirStatus RETURNS CHARACTER
     ASSIGN pcClean = dirWithSlash(FILE-INFO:FULL-PATHNAME).
     cProbe = pcClean + "menu_path_check_":U + STRING(ETIME) + ".tmp":U.
 
-    SET-SIZE(mProbe) = 1.
-    PUT-BYTE(mProbe, 1) = 32.
-    COPY-LOB FROM mProbe TO FILE cProbe NO-ERROR.
-    IF ERROR-STATUS:ERROR THEN DO:
+    DO ON ERROR UNDO, LEAVE:
+        SET-SIZE(mProbe) = 1.
+        PUT-BYTE(mProbe, 1) = 32.
+        COPY-LOB FROM mProbe TO FILE cProbe NO-ERROR.
+        IF ERROR-STATUS:ERROR THEN LEAVE.
         SET-SIZE(mProbe) = 0.
-        RETURN "That folder exists, but a file cannot be created there.".
+        OS-DELETE VALUE(cProbe) NO-ERROR.
+        RETURN "".
     END.
 
     SET-SIZE(mProbe) = 0.
-    OS-DELETE VALUE(cProbe) NO-ERROR.
-    RETURN "".
+    RETURN "That folder exists, but a file cannot be created there.".
 END FUNCTION.
 
 FUNCTION dirWithSlash RETURNS CHARACTER (INPUT pcDir AS CHARACTER):
