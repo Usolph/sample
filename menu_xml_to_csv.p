@@ -25,7 +25,7 @@
                   document stays well-formed.
   ----------------------------------------------------------------------*/
 
-DEFINE VARIABLE cXmlFile    AS CHARACTER NO-UNDO FORMAT "x(52)".
+DEFINE VARIABLE cXmlFile    AS CHARACTER NO-UNDO FORMAT "x(512)".
 DEFINE VARIABLE cRootMenu   AS CHARACTER NO-UNDO FORMAT "x(40)" INITIAL "eb_Main".
 DEFINE VARIABLE gcFail      AS CHARACTER NO-UNDO.
 DEFINE VARIABLE gcOutFile   AS CHARACTER NO-UNDO.
@@ -34,7 +34,7 @@ DEFINE VARIABLE giRows      AS INTEGER   NO-UNDO.
 
 DEFINE BUTTON btn_extract LABEL "Extract".
 DEFINE BUTTON btn_browse  LABEL "Browse".
-DEFINE BUTTON btn_exit    LABEL "Exit" AUTO-ENDKEY.
+DEFINE BUTTON btn_exit    LABEL "Exit".
 
 /* The path separator is a scoped value so the breadcrumb stays consistent. */
 &SCOPED-DEFINE PATH-SEP " > "
@@ -170,10 +170,12 @@ FUNCTION programPath RETURNS CHARACTER
 
 FORM
     SKIP(1)
-    cXmlFile COLON 18 LABEL "XML File"
+    cXmlFile COLON 18 LABEL "XML File" FORMAT "x(512)"
+        VIEW-AS FILL-IN SIZE 68 BY 1
         HELP "Full path of the MIP menu XML export"
     SKIP
     cRootMenu COLON 18 LABEL "Root Menu"
+        VIEW-AS FILL-IN SIZE 40 BY 1
         HELP "Menu code to export. Leave blank to export every top-level menu."
     SKIP(1)
     btn_extract AT 18
@@ -190,16 +192,40 @@ FORM
         OVERLAY
         TITLE " Import Menu XML "
         ROW 2
-        WIDTH 78.
+        WIDTH 96.
 
-ON RETURN OF cRootMenu IN FRAME f-import DO:
-    APPLY "CHOOSE" TO btn_extract IN FRAME f-import.
-    RETURN NO-APPLY.
+ON CHOOSE OF btn_extract IN FRAME f-import DO:
+    /* Click and Enter (the frame default button) both land here. */
+    ASSIGN
+        cXmlFile  = cXmlFile:SCREEN-VALUE IN FRAME f-import
+        cRootMenu = cRootMenu:SCREEN-VALUE IN FRAME f-import.
+
+    SESSION:SET-WAIT-STATE("GENERAL").
+    RUN runExtract (INPUT cXmlFile, INPUT cRootMenu) NO-ERROR.
+    SESSION:SET-WAIT-STATE("").
+
+    IF ERROR-STATUS:ERROR THEN
+        MESSAGE ERROR-STATUS:GET-MESSAGE(1)
+            VIEW-AS ALERT-BOX ERROR TITLE "Import Menu XML".
+    ELSE IF gcFail <> "" THEN
+        MESSAGE gcFail
+            VIEW-AS ALERT-BOX ERROR TITLE "Import Menu XML".
+    ELSE
+        MESSAGE
+            "Extract Done:" SKIP
+            gcOutFile SKIP
+            STRING(giRows) "menu rows."
+            VIEW-AS ALERT-BOX INFORMATION TITLE "Extract Done".
 END.
 
 ON CHOOSE OF btn_browse IN FRAME f-import DO:
     /* Stay on the import frame so a cancelled browse does not extract. */
     RUN browseForXml.
+    RETURN NO-APPLY.
+END.
+
+ON END-ERROR OF FRAME f-import DO:
+    APPLY "CHOOSE" TO btn_exit IN FRAME f-import.
     RETURN NO-APPLY.
 END.
 
@@ -211,27 +237,14 @@ IF SESSION:BATCH-MODE THEN DO:
     RETURN.
 END.
 
-REPEAT
-    ON ERROR  UNDO, NEXT
-    ON ENDKEY UNDO, LEAVE
-    ON STOP   UNDO, LEAVE
-    ON QUIT   UNDO, LEAVE:
+DISPLAY cXmlFile cRootMenu WITH FRAME f-import.
+ENABLE cXmlFile cRootMenu btn_extract btn_browse btn_exit
+    WITH FRAME f-import.
+FRAME f-import:DEFAULT-BUTTON = btn_extract:HANDLE IN FRAME f-import.
+APPLY "ENTRY" TO cXmlFile IN FRAME f-import.
 
-    UPDATE cXmlFile cRootMenu btn_extract btn_browse btn_exit
-        WITH FRAME f-import.
-
-    RUN runExtract (INPUT cXmlFile, INPUT cRootMenu).
-
-    IF gcFail <> "" THEN
-        MESSAGE gcFail
-            VIEW-AS ALERT-BOX ERROR TITLE "Import Menu XML".
-    ELSE
-        MESSAGE
-            "Extract Done:" SKIP
-            gcOutFile SKIP
-            STRING(giRows) "menu rows."
-            VIEW-AS ALERT-BOX INFORMATION TITLE "Extract Done".
-END.
+WAIT-FOR CHOOSE OF btn_exit IN FRAME f-import
+    OR WINDOW-CLOSE OF CURRENT-WINDOW.
 
 /*------------------------------------------------------------------------
     Import frame actions and the extract itself.
