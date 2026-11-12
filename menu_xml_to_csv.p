@@ -20,6 +20,7 @@ BLOCK-LEVEL ON ERROR UNDO, THROW.
   DEFINE VARIABLE gcFail                     AS CHARACTER                                                  NO-UNDO.
   DEFINE VARIABLE gcWritten                  AS CHARACTER                                                  NO-UNDO.
   DEFINE VARIABLE giFiles                    AS INTEGER                                                    NO-UNDO.
+  DEFINE VARIABLE glCheckingDir              AS LOGICAL                                                    NO-UNDO.
   DEFINE VARIABLE glcCsv                     AS LONGCHAR                                                   NO-UNDO.
 
   /* Frames ............................................................................................................*/
@@ -165,6 +166,8 @@ FUNCTION csvHeader RETURNS CHARACTER () FORWARD.
 FUNCTION fmtObj    RETURNS CHARACTER (INPUT pdValue AS DECIMAL) FORWARD.
 FUNCTION safeToken RETURNS CHARACTER (INPUT pcValue AS CHARACTER) FORWARD.
 FUNCTION dirWithSlash RETURNS CHARACTER (INPUT pcDir AS CHARACTER) FORWARD.
+FUNCTION outputDirStatus RETURNS CHARACTER
+    (INPUT pcDir AS CHARACTER, OUTPUT pcClean AS CHARACTER) FORWARD.
 FUNCTION itemType  RETURNS CHARACTER
     (INPUT pcLink AS CHARACTER,
      INPUT piKids AS INTEGER,
@@ -179,13 +182,13 @@ FUNCTION programPath RETURNS CHARACTER
     "Root Menu:"         AT ROW 5.4   COL 3  VIEW-AS TEXT cRootMenu              AT ROW 5.1   COL 25 NO-LABEL
                          HELP "Optional. Leave blank to write one CSV for each root menu."
     "Output Directory:"  AT ROW 7.4   COL 3  VIEW-AS TEXT cFile                  AT ROW 7.1   COL 25 NO-LABEL
-                         HELP "Folder for the CSV files. Change this if the Q&D folder is not the one you want."
+                         HELP "Checked when you leave the field. The folder has to exist."
      BuExtract           AT ROW 7.1   COL 130
     "Leave Root Menu blank to write one CSV for each root menu." AT ROW 9.4 COL 3
                          VIEW-AS TEXT SIZE 140 BY 1
     "MenuPath is the label breadcrumb. MenuCodePath is the same path in menu codes." AT ROW 10.6 COL 3
                          VIEW-AS TEXT SIZE 140 BY 1
-    "Output Directory starts in the Q&D folder. Change it before Extract if the files should go somewhere else." AT ROW 11.8 COL 3
+    "The folder is checked when you leave the field. Extract runs only when that folder exists." AT ROW 11.8 COL 3
                          VIEW-AS TEXT SIZE 140 BY 1
      WITH SIDE-LABELS THREE-D
      AT COL 1 ROW 1 SCROLLABLE
@@ -209,9 +212,40 @@ FUNCTION programPath RETURNS CHARACTER
     END.
   END.
 
+  ON LEAVE OF cFile IN FRAME main-frame
+  DO:
+    DEFINE VARIABLE cClean  AS CHARACTER NO-UNDO.
+    DEFINE VARIABLE cReason AS CHARACTER NO-UNDO.
+
+    /* Closing the dialog must not be trapped by the path check. */
+    IF KEYFUNCTION(LASTKEY) = "END-ERROR":U
+       OR LAST-EVENT:LABEL = "WINDOW-CLOSE":U THEN RETURN.
+    IF glCheckingDir THEN RETURN NO-APPLY.
+
+    glCheckingDir = TRUE.
+    cReason = outputDirStatus(INPUT cFile:SCREEN-VALUE, OUTPUT cClean).
+    IF cReason = "":U THEN
+    DO:
+      ASSIGN
+        cFile              = cClean
+        cFile:SCREEN-VALUE = cClean
+        BuExtract:SENSITIVE = TRUE.
+      glCheckingDir = FALSE.
+      RETURN.
+    END.
+
+    ASSIGN BuExtract:SENSITIVE = FALSE.
+    MESSAGE cReason SKIP
+            cFile:SCREEN-VALUE
+        VIEW-AS ALERT-BOX ERROR BUTTONS OK.
+    glCheckingDir = FALSE.
+    RETURN NO-APPLY.
+  END.
+
   ON CHOOSE OF BuExtract IN FRAME main-frame
   DO:
-    DEFINE VARIABLE cDir AS CHARACTER NO-UNDO.
+    DEFINE VARIABLE cDir    AS CHARACTER NO-UNDO.
+    DEFINE VARIABLE cReason AS CHARACTER NO-UNDO.
 
     DO WITH FRAME main-frame:
       ASSIGN
@@ -239,33 +273,18 @@ FUNCTION programPath RETURNS CHARACTER
       RETURN NO-APPLY.
     END.
 
-    /* Keep the folder on screen. Do not put the Q&D path back over an edit. */
-    cDir = dirWithSlash(cFile).
-    IF cDir = "":U THEN
+    /* The leave trigger already checked this. Check again so Extract cannot run on a bad folder. */
+    ASSIGN cReason = outputDirStatus(INPUT cFile, OUTPUT cDir).
+    IF cReason <> "":U THEN
     DO:
-      MESSAGE "Enter the folder where the CSV files should be written.":U
+      ASSIGN BuExtract:SENSITIVE = FALSE.
+      MESSAGE cReason SKIP
+              cFile
           VIEW-AS ALERT-BOX ERROR BUTTONS OK.
+      APPLY "ENTRY" TO cFile IN FRAME main-frame.
       RETURN NO-APPLY.
     END.
-
-    FILE-INFO:FILE-NAME = RIGHT-TRIM(cDir, CHR(92)) NO-ERROR.
-    IF FILE-INFO:FULL-PATHNAME = ?
-       OR INDEX(FILE-INFO:FILE-TYPE, "D":U) = 0 THEN
-    DO:
-      MESSAGE "The output directory is not available.":U SKIP
-              cDir
-          VIEW-AS ALERT-BOX ERROR BUTTONS OK.
-      RETURN NO-APPLY.
-    END.
-    IF INDEX(FILE-INFO:FILE-TYPE, "W":U) = 0 THEN
-    DO:
-      MESSAGE "You do not have access to write to the output directory.":U SKIP
-              FILE-INFO:FULL-PATHNAME
-          VIEW-AS ALERT-BOX ERROR BUTTONS OK.
-      RETURN NO-APPLY.
-    END.
-
-    ASSIGN cFile = dirWithSlash(FILE-INFO:FULL-PATHNAME).
+    ASSIGN cFile = cDir.
     DO WITH FRAME main-frame:
       ASSIGN cFile:SCREEN-VALUE = cFile.
     END.
@@ -329,28 +348,33 @@ FUNCTION programPath RETURNS CHARACTER
   IF cMipLog <> "":U THEN
     ASSIGN cMipLog = cMipLog + CHR(92) + "log":U.
 
-  IF cMipLog <> "":U THEN
+  /* A value is checked as soon as the field has one, and again when you leave it. */
+  IF cMipLog <> "":U
+     AND outputDirStatus(INPUT cMipLog, OUTPUT cTargetDir) = "":U THEN
+    ASSIGN cFile = cTargetDir.
+  ELSE
+  IF outputDirStatus(INPUT SESSION:TEMP-DIRECTORY, OUTPUT cTargetDir) = "":U THEN
   DO:
-    FILE-INFO:FILE-NAME = cMipLog NO-ERROR.
-    IF FILE-INFO:FULL-PATHNAME <> ?
-       AND INDEX(FILE-INFO:FILE-TYPE, "D":U) > 0
-       AND INDEX(FILE-INFO:FILE-TYPE, "W":U) > 0 THEN
-      ASSIGN cTargetDir = FILE-INFO:FULL-PATHNAME.
+    ASSIGN cFile = cTargetDir.
+    IF cMipLog <> "":U THEN
+      MESSAGE "The Q&D Fix Directory is not a folder this session can write.":U SKIP
+              "Output Directory starts in the session temp directory.":U SKIP
+              "Change it if the CSV files should go somewhere else.":U
+          VIEW-AS ALERT-BOX INFO BUTTONS OK.
   END.
-
-  IF cTargetDir = "":U THEN
-  DO:
-    ASSIGN cTargetDir = SESSION:TEMP-DIRECTORY.
-    MESSAGE "The Q&D Fix Directory is not available, so Output Directory starts in the session temp directory.":U SKIP
-            "Change it before Extract if the CSV files should go somewhere else.":U
-        VIEW-AS ALERT-BOX INFO BUTTONS OK.
-  END.
-
-  ASSIGN cFile = dirWithSlash(cTargetDir).
+  ELSE
+    ASSIGN cFile = "".
 
   ENABLE ALL WITH FRAME main-frame.
   DISPLAY cFile cRootMenu WITH FRAME main-frame.
+  ASSIGN BuExtract:SENSITIVE = (cFile <> "":U).
   FRAME main-frame:DEFAULT-BUTTON = BuExtract:HANDLE IN FRAME main-frame.
+  IF cFile = "":U THEN
+  DO:
+    MESSAGE "Enter a folder that exists. Extract stays unavailable until a file can be created there.":U
+        VIEW-AS ALERT-BOX ERROR BUTTONS OK.
+    APPLY "ENTRY" TO cFile IN FRAME main-frame.
+  END.
 
   WAIT-FOR "GO" OF FRAME main-frame.
 
@@ -805,6 +829,32 @@ FUNCTION fmtObj RETURNS CHARACTER (INPUT pdValue AS DECIMAL):
 /* Menu and object ids are whole numbers in the export. Blank means none. */
     IF pdValue = ? OR pdValue = 0 THEN RETURN "".
     RETURN TRIM(STRING(TRUNCATE(pdValue, 0), ">>>>>>>>>>>>>>>>>9")).
+END FUNCTION.
+
+FUNCTION outputDirStatus RETURNS CHARACTER
+    (INPUT pcDir AS CHARACTER, OUTPUT pcClean AS CHARACTER):
+/* Blank when the folder exists and a file can be created there. Otherwise the reason. */
+    DEFINE VARIABLE cProbe AS CHARACTER NO-UNDO.
+
+    ASSIGN pcClean = dirWithSlash(pcDir).
+    IF pcClean = "":U THEN
+        RETURN "Enter a folder for the CSV files. The folder has to exist.".
+
+    FILE-INFO:FILE-NAME = RIGHT-TRIM(pcClean, CHR(92)) NO-ERROR.
+    IF FILE-INFO:FULL-PATHNAME = ?
+       OR INDEX(FILE-INFO:FILE-TYPE, "D":U) = 0 THEN
+        RETURN "That folder does not exist.".
+
+    ASSIGN pcClean = dirWithSlash(FILE-INFO:FULL-PATHNAME).
+    cProbe = pcClean + "menu_path_check_":U + STRING(ETIME) + ".tmp":U.
+
+    OUTPUT TO VALUE(cProbe) NO-ERROR.
+    IF ERROR-STATUS:ERROR THEN
+        RETURN "That folder exists, but a file cannot be created there.".
+
+    OUTPUT CLOSE.
+    OS-DELETE VALUE(cProbe) NO-ERROR.
+    RETURN "".
 END FUNCTION.
 
 FUNCTION dirWithSlash RETURNS CHARACTER (INPUT pcDir AS CHARACTER):
