@@ -1,8 +1,8 @@
 BLOCK-LEVEL ON ERROR UNDO, THROW.
 /*------------------------------------------------------------------------
   12/11/2026    Usolph Mamaila
-  - DCR to turn a MIP menu XML export into a CSV for security role prep
-  - Imports the dsMIP XML and writes the menu tree, including MenuPath
+  - DCR to turn a MIP menu XML export into CSV files for security role prep
+  - One CSV per root menu. Leave Root Menu blank when the export has every menu
   ----------------------------------------------------------------------*/
 /* **********************************************  Definitions  *********************************************** */
   {mip/inc/mipdefshared.i}
@@ -14,10 +14,12 @@ BLOCK-LEVEL ON ERROR UNDO, THROW.
   DEFINE VARIABLE cImportFile                AS CHARACTER  VIEW-AS FILL-IN SIZE 100 BY 1 FORMAT "x(200)"   NO-UNDO.
   DEFINE VARIABLE cFile                      AS CHARACTER  VIEW-AS FILL-IN SIZE 100 BY 1 FORMAT "x(200)"   NO-UNDO.
   DEFINE VARIABLE cFilename                  AS CHARACTER                                                  NO-UNDO.
-  DEFINE VARIABLE cRootMenu                  AS CHARACTER  VIEW-AS FILL-IN SIZE 40 BY 1 FORMAT "x(40)"     NO-UNDO INITIAL "eb_Main":U.
+  DEFINE VARIABLE cRootMenu                  AS CHARACTER  VIEW-AS FILL-IN SIZE 40 BY 1 FORMAT "x(80)"     NO-UNDO.
   DEFINE VARIABLE cMipLog                    AS CHARACTER                                                  NO-UNDO.
   DEFINE VARIABLE cTargetDir                 AS CHARACTER                                                  NO-UNDO.
   DEFINE VARIABLE gcFail                     AS CHARACTER                                                  NO-UNDO.
+  DEFINE VARIABLE gcWritten                  AS CHARACTER                                                  NO-UNDO.
+  DEFINE VARIABLE giFiles                    AS INTEGER                                                    NO-UNDO.
   DEFINE VARIABLE glcCsv                     AS LONGCHAR                                                   NO-UNDO.
 
   /* Frames ............................................................................................................*/
@@ -25,12 +27,8 @@ BLOCK-LEVEL ON ERROR UNDO, THROW.
     LABEL "&Find..."
     SIZE 14 BY 1.14
     BGCOLOR 8.
-  DEFINE BUTTON BuImport
-    LABEL "&Import..."
-    SIZE 14 BY 1.14
-    BGCOLOR 8.
-  DEFINE BUTTON BuLayout
-    LABEL "&Layout..."
+  DEFINE BUTTON BuExtract
+    LABEL "&Extract"
     SIZE 14 BY 1.14
     BGCOLOR 8.
 
@@ -153,10 +151,20 @@ DEFINE TEMP-TABLE tt-visit NO-UNDO
     FIELD menu_obj AS DECIMAL DECIMALS 9
     INDEX idx_visit IS UNIQUE menu_obj.
 
+/* One row per CSV. A full export writes a file for every root menu. */
+DEFINE TEMP-TABLE tt-export NO-UNDO
+    FIELD iSeq      AS INTEGER
+    FIELD menu_code AS CHARACTER
+    FIELD menu_obj  AS DECIMAL DECIMALS 9
+    FIELD cOutFile  AS CHARACTER
+    FIELD iRows     AS INTEGER
+    INDEX idx_seq iSeq.
+
 FUNCTION csvCell   RETURNS CHARACTER (INPUT pcValue AS CHARACTER) FORWARD.
 FUNCTION csvHeader RETURNS CHARACTER () FORWARD.
 FUNCTION fmtObj    RETURNS CHARACTER (INPUT pdValue AS DECIMAL) FORWARD.
 FUNCTION safeToken RETURNS CHARACTER (INPUT pcValue AS CHARACTER) FORWARD.
+FUNCTION dirWithSlash RETURNS CHARACTER (INPUT pcDir AS CHARACTER) FORWARD.
 FUNCTION itemType  RETURNS CHARACTER
     (INPUT pcLink AS CHARACTER,
      INPUT piKids AS INTEGER,
@@ -166,15 +174,22 @@ FUNCTION programPath RETURNS CHARACTER
     (INPUT pcPath AS CHARACTER, INPUT pcFile AS CHARACTER) FORWARD.
 
   DEFINE FRAME main-frame
-    "Input File:"       AT ROW 3.4   COL 3  VIEW-AS TEXT cImportFile           AT ROW 3.1   COL 25 NO-LABEL
-     BuFind             AT ROW 3.0   COL 130
-    "Root Menu:"        AT ROW 5.4   COL 3  VIEW-AS TEXT cRootMenu              AT ROW 5.1   COL 25 NO-LABEL
-    "Output File:"      AT ROW 7.4   COL 3  VIEW-AS TEXT cFile                  AT ROW 7.1   COL 25 NO-LABEL
-     BuImport           AT ROW 7.1   COL 130
-     BuLayout           AT ROW 8.4   COL 130
+    "Input File:"        AT ROW 3.4   COL 3  VIEW-AS TEXT cImportFile           AT ROW 3.1   COL 25 NO-LABEL
+     BuFind              AT ROW 3.0   COL 130
+    "Root Menu:"         AT ROW 5.4   COL 3  VIEW-AS TEXT cRootMenu              AT ROW 5.1   COL 25 NO-LABEL
+                         HELP "Optional. Leave blank to write one CSV for each root menu."
+    "Output Directory:"  AT ROW 7.4   COL 3  VIEW-AS TEXT cFile                  AT ROW 7.1   COL 25 NO-LABEL
+                         HELP "Folder for the CSV files. Change this if the Q&D folder is not the one you want."
+     BuExtract           AT ROW 7.1   COL 130
+    "Leave Root Menu blank to write one CSV for each root menu." AT ROW 9.4 COL 3
+                         VIEW-AS TEXT SIZE 140 BY 1
+    "MenuPath is the label breadcrumb. MenuCodePath is the same path in menu codes." AT ROW 10.6 COL 3
+                         VIEW-AS TEXT SIZE 140 BY 1
+    "Output Directory starts in the Q&D folder. Change it before Extract if the files should go somewhere else." AT ROW 11.8 COL 3
+                         VIEW-AS TEXT SIZE 140 BY 1
      WITH SIDE-LABELS THREE-D
      AT COL 1 ROW 1 SCROLLABLE
-     SIZE 150 BY 12
+     SIZE 150 BY 14
      TITLE "Menu XML to CSV"
      VIEW-AS DIALOG-BOX.
 
@@ -194,43 +209,63 @@ FUNCTION programPath RETURNS CHARACTER
     END.
   END.
 
-  ON CHOOSE OF BuLayout IN FRAME main-frame
+  ON CHOOSE OF BuExtract IN FRAME main-frame
   DO:
-    MESSAGE
-      "MenuPath is the label breadcrumb, from the root down to this item." SKIP
-      "MenuCodePath is the same path using menu codes." SKIP
-      "ObjectCode is the wob to secure. ProgramPath is the program it runs." SKIP
-      "DisplayRule and ActiveRule show when the item is hidden or disabled." SKIP(1)
-      "Leave Root Menu blank to export every top-level menu." SKIP
-      "eb_Main is the usual parent."
-      VIEW-AS ALERT-BOX INFO BUTTONS OK TITLE PROGRAM-NAME(1) + "=-= ".
-  END.
+    DEFINE VARIABLE cDir AS CHARACTER NO-UNDO.
 
-  ON CHOOSE OF BuImport IN FRAME main-frame  /* Import */
-  DO:
+    DO WITH FRAME main-frame:
+      ASSIGN
+        cImportFile
+        cFile
+        cRootMenu.
+    END.
+
     ASSIGN
-      cFilename = cImportFile:SCREEN-VALUE
-      cRootMenu = cRootMenu:SCREEN-VALUE.
+      cFilename = TRIM(cImportFile)
+      cRootMenu = TRIM(cRootMenu)
+      cFile     = TRIM(cFile).
 
     IF cFilename = "":U THEN
     DO:
-      MESSAGE "Enter the XML file to import.":U
+      MESSAGE "Enter the XML file to extract.":U
           VIEW-AS ALERT-BOX ERROR BUTTONS OK.
       RETURN NO-APPLY.
     END.
 
     IF SEARCH(cFilename) = ? THEN
     DO:
-      MESSAGE "The import file specified can not be found.":U
+      MESSAGE "The XML file specified can not be found.":U
           VIEW-AS ALERT-BOX ERROR BUTTONS OK.
       RETURN NO-APPLY.
     END.
 
-    ASSIGN cFile = cTargetDir + SUBSTITUTE("&1_&2_&3&4.csv":U,
-                                            "menu":U,
-                                            safeToken(cRootMenu),
-                                            STRING(TODAY,"99999999":U),
-                                            REPLACE(STRING(TIME,"hh:mm:ss":U),":":U, "":U)).
+    /* Keep the folder on screen. Do not put the Q&D path back over an edit. */
+    cDir = dirWithSlash(cFile).
+    IF cDir = "":U THEN
+    DO:
+      MESSAGE "Enter the folder where the CSV files should be written.":U
+          VIEW-AS ALERT-BOX ERROR BUTTONS OK.
+      RETURN NO-APPLY.
+    END.
+
+    FILE-INFO:FILE-NAME = RIGHT-TRIM(cDir, CHR(92)) NO-ERROR.
+    IF FILE-INFO:FULL-PATHNAME = ?
+       OR INDEX(FILE-INFO:FILE-TYPE, "D":U) = 0 THEN
+    DO:
+      MESSAGE "The output directory is not available.":U SKIP
+              cDir
+          VIEW-AS ALERT-BOX ERROR BUTTONS OK.
+      RETURN NO-APPLY.
+    END.
+    IF INDEX(FILE-INFO:FILE-TYPE, "W":U) = 0 THEN
+    DO:
+      MESSAGE "You do not have access to write to the output directory.":U SKIP
+              FILE-INFO:FULL-PATHNAME
+          VIEW-AS ALERT-BOX ERROR BUTTONS OK.
+      RETURN NO-APPLY.
+    END.
+
+    ASSIGN cFile = dirWithSlash(FILE-INFO:FULL-PATHNAME).
     DO WITH FRAME main-frame:
       ASSIGN cFile:SCREEN-VALUE = cFile.
     END.
@@ -239,7 +274,7 @@ FUNCTION programPath RETURNS CHARACTER
     RUN main-code IN THIS-PROCEDURE NO-ERROR.
     IF ERROR-STATUS:ERROR OR {&ReturnValue} <> "":U THEN
     DO:
-      MESSAGE "ERROR occured during IMPORT PROCESS:":U SKIP
+      MESSAGE "ERROR occured during EXTRACT PROCESS:":U SKIP
               IF {&ReturnValue} <> "":U THEN {&ReturnValue}
               ELSE ERROR-STATUS:GET-MESSAGE(1)
           VIEW-AS ALERT-BOX ERROR BUTTONS OK.
@@ -251,13 +286,14 @@ FUNCTION programPath RETURNS CHARACTER
     DISPLAY cFile WITH FRAME main-frame.
     MESSAGE "Extract Done:":U SKIP
             cFile SKIP
-            STRING(iCount) " menu rows."
+            STRING(giFiles) " CSV files," STRING(iCount) " menu rows." SKIP(1)
+            gcWritten
         VIEW-AS ALERT-BOX INFO BUTTONS OK.
   END.
 
   /* --- Display Q&D Full Description ---------- */
   MESSAGE "Menu XML to CSV - written by Usolph":U SKIP(1)
-          "This DCR reads a dsMIP menu export and writes a CSV of the menu tree.":U SKIP(1)
+          "This DCR reads a dsMIP menu export and writes one CSV for each root menu.":U SKIP(1)
           "Do you want to run this DCR?":U
     VIEW-AS ALERT-BOX INFO BUTTONS YES-NO UPDATE lOk.
   IF NOT lOk THEN RETURN.
@@ -278,80 +314,78 @@ FUNCTION programPath RETURNS CHARACTER
     RETURN.
   END.
 
-  /* --- Get output directory for the CSV ---------- */
+  /* --- Default output folder. The fill-in stays editable. ---------- */
+  /* CHR(92) is the backslash. A backslash-quote :U literal does not compile. */
+  ASSIGN cTargetDir = "".
   FIND FIRST pac_parameter NO-LOCK
        WHERE pac_parameter.parameter_type = "Q&D":U
          AND pac_parameter.parameter_key  = "Fix Directory":U
        NO-ERROR.
-  IF NOT AVAILABLE pac_parameter
-  THEN DO:
-    MESSAGE "ERROR: Please setup the Q&D output directory in the PAC Parameters.":U SKIP
-            "Type = Q&D":U SKIP
-            "Key = Fix Directory":U
-            VIEW-AS ALERT-BOX ERROR BUTTONS OK.
-    RETURN.
+  IF AVAILABLE pac_parameter THEN
+    ASSIGN cMipLog = TRIM(REPLACE(TRIM(pac_parameter.parameter_data), CHR(47), CHR(92)), CHR(92)).
+  ELSE
+    ASSIGN cMipLog = "".
+
+  IF cMipLog <> "":U THEN
+    ASSIGN cMipLog = cMipLog + CHR(92) + "log":U.
+
+  IF cMipLog <> "":U THEN
+  DO:
+    FILE-INFO:FILE-NAME = cMipLog NO-ERROR.
+    IF FILE-INFO:FULL-PATHNAME <> ?
+       AND INDEX(FILE-INFO:FILE-TYPE, "D":U) > 0
+       AND INDEX(FILE-INFO:FILE-TYPE, "W":U) > 0 THEN
+      ASSIGN cTargetDir = FILE-INFO:FULL-PATHNAME.
   END.
 
-  ASSIGN cMipLog = TRIM(REPLACE(pac_parameter.parameter_data, "/":U, "\":U), "\":U) + "\log\":U.
-
-  IF cMipLog = "":U
-  THEN DO:
-    MESSAGE "ERROR: The Q&D output directory in the PAC Parameters is invalid.":U
-        VIEW-AS ALERT-BOX ERROR BUTTONS OK.
-    RETURN.
+  IF cTargetDir = "":U THEN
+  DO:
+    ASSIGN cTargetDir = SESSION:TEMP-DIRECTORY.
+    MESSAGE "The Q&D Fix Directory is not available, so Output Directory starts in the session temp directory.":U SKIP
+            "Change it before Extract if the CSV files should go somewhere else.":U
+        VIEW-AS ALERT-BOX INFO BUTTONS OK.
   END.
 
-  ASSIGN
-    cMipLog = TRIM(REPLACE(cMipLog, "/":U, "\",U), "\":U)
-    cMipLog = IF SUBSTRING(cMipLog,LENGTH(cMipLog),1) = "\":U THEN cMipLog ELSE cMipLog + "\":U
-    cTargetDir = cMipLog.
-
-  /* Check if the directory exists */
-  FILE-INFO:FILE-NAME = cMipLog NO-ERROR.
-  IF FILE-INFO:FULL-PATHNAME <> ?
-  THEN DO:
-    IF INDEX(FILE-INFO:FILE-TYPE, "W":U) = 0
-    THEN DO:
-      MESSAGE "ERROR: You do not have have access to write to the output directory.":U
-          VIEW-AS ALERT-BOX ERROR BUTTONS OK.
-      RETURN.
-    END.
-  END.
-  ELSE DO:
-    MESSAGE "ERROR: The Q&D output directory in the PAC Parameter has an invalid value of":U pac_parameter.parameter_data
-          VIEW-AS ALERT-BOX ERROR BUTTONS OK.
-    RETURN.
-  END.
-
-  ASSIGN
-    cFile = cTargetDir + SUBSTITUTE("&1_&2_&3&4.csv":U,
-                                    "menu":U,
-                                    safeToken(cRootMenu),
-                                    STRING(TODAY,"99999999":U),
-                                    REPLACE(STRING(TIME,"hh:mm:ss":U),":":U, "":U)).
+  ASSIGN cFile = dirWithSlash(cTargetDir).
 
   ENABLE ALL WITH FRAME main-frame.
   DISPLAY cFile cRootMenu WITH FRAME main-frame.
+  FRAME main-frame:DEFAULT-BUTTON = BuExtract:HANDLE IN FRAME main-frame.
 
   WAIT-FOR "GO" OF FRAME main-frame.
 
 PROCEDURE main-code:
-/* Read the XML and write the menu CSV to cFile. */
-  DEFINE VARIABLE iMenus AS INTEGER NO-UNDO.
-  DEFINE BUFFER bCount FOR ws_menu.
+/* Read the XML and write one CSV per root menu into cFile. */
+  DEFINE VARIABLE iMenus AS INTEGER   NO-UNDO.
+  DEFINE VARIABLE iSeq   AS INTEGER   NO-UNDO.
+  DEFINE VARIABLE cStamp AS CHARACTER NO-UNDO.
+  DEFINE VARIABLE cOut   AS CHARACTER NO-UNDO.
+  DEFINE VARIABLE cDir   AS CHARACTER NO-UNDO.
+  DEFINE BUFFER bCount  FOR ws_menu.
+  DEFINE BUFFER bRoot   FOR ws_menu.
+  DEFINE BUFFER bParent FOR ws_menu.
+  DEFINE BUFFER bTaken  FOR tt-export.
 
   ASSIGN
-    gcFail = "":U
-    giRows = 0
-    glcCsv = "".
+    gcFail    = "":U
+    giRows    = 0
+    giFiles   = 0
+    iCount    = 0
+    gcWritten = "":U
+    glcCsv    = "".
 
   EMPTY TEMP-TABLE ws_menu.
   EMPTY TEMP-TABLE mi_object.
   EMPTY TEMP-TABLE tt-visit.
+  EMPTY TEMP-TABLE tt-export.
 
   ASSIGN
     cFilename = TRIM(cFilename)
-    cRootMenu = TRIM(cRootMenu).
+    cRootMenu = TRIM(cRootMenu)
+    cDir      = dirWithSlash(cFile).
+
+  IF cDir = "":U THEN
+    RETURN ERROR "Enter the folder where the CSV files should be written.".
 
   RUN loadMenuXml (INPUT cFilename).
   IF gcFail <> "":U THEN
@@ -363,25 +397,93 @@ PROCEDURE main-code:
   IF iMenus = 0 THEN
     RETURN ERROR "No ws_menu records were found in the XML. The file should be a dsMIP menu export.".
 
-  IF cRootMenu <> "":U
-     AND NOT CAN-FIND(FIRST ws_menu WHERE ws_menu.menu_code = cRootMenu) THEN
-    RETURN ERROR "Root menu '" + cRootMenu + "' was not found. "
-                + STRING(iMenus) + " menus were read. "
-                + "Leave Root Menu blank to export every top-level menu.".
+  IF cRootMenu <> "":U THEN
+  DO:
+    IF NOT CAN-FIND(FIRST ws_menu WHERE ws_menu.menu_code = cRootMenu) THEN
+      RETURN ERROR "Root menu '" + cRootMenu + "' is not in this file. "
+                  + STRING(iMenus) + " menus were read. "
+                  + "Leave Root Menu blank to write one CSV for each root menu.".
 
-  glcCsv = csvHeader() + CHR(13) + CHR(10).
-  RUN writeTree (INPUT cRootMenu).
-  RUN writeUtf8File (INPUT cFile, INPUT glcCsv).
-  IF gcFail <> "":U THEN
-    RETURN ERROR gcFail.
+    FOR EACH bRoot
+        WHERE bRoot.menu_code = cRootMenu
+        BY bRoot.menu_sequence
+        BY bRoot.menu_label
+        BY bRoot.menu_code:
+      iSeq = iSeq + 1.
+      CREATE tt-export.
+      ASSIGN
+        tt-export.iSeq      = iSeq
+        tt-export.menu_code = bRoot.menu_code
+        tt-export.menu_obj  = bRoot.menu_obj.
+    END.
+  END.
+  ELSE DO:
+    /* Blank root: every top-level menu, plus any menu whose parent is not in the file. */
+    FOR EACH bRoot
+        WHERE bRoot.parent_menu_obj = 0
+        BY bRoot.menu_sequence
+        BY bRoot.menu_label
+        BY bRoot.menu_code:
+      iSeq = iSeq + 1.
+      CREATE tt-export.
+      ASSIGN
+        tt-export.iSeq      = iSeq
+        tt-export.menu_code = bRoot.menu_code
+        tt-export.menu_obj  = bRoot.menu_obj.
+    END.
 
-  FILE-INFO:FILE-NAME = cFile.
-  IF FILE-INFO:FULL-PATHNAME = ? THEN
-    RETURN ERROR "The CSV was not created.".
+    FOR EACH bRoot
+        WHERE bRoot.parent_menu_obj <> 0
+        BY bRoot.menu_sequence
+        BY bRoot.menu_label
+        BY bRoot.menu_code:
+      IF CAN-FIND(FIRST bParent WHERE bParent.menu_obj = bRoot.parent_menu_obj) THEN NEXT.
+      iSeq = iSeq + 1.
+      CREATE tt-export.
+      ASSIGN
+        tt-export.iSeq      = iSeq
+        tt-export.menu_code = bRoot.menu_code
+        tt-export.menu_obj  = bRoot.menu_obj.
+    END.
+  END.
 
-  ASSIGN
-    cFile  = FILE-INFO:FULL-PATHNAME
-    iCount = giRows.
+  IF NOT CAN-FIND(FIRST tt-export) THEN
+    RETURN ERROR "No root menus were found in the XML.".
+
+  cStamp = STRING(TODAY, "99999999":U)
+         + REPLACE(STRING(TIME, "hh:mm:ss":U), ":":U, "":U).
+
+  FOR EACH tt-export BY tt-export.iSeq:
+    EMPTY TEMP-TABLE tt-visit.
+    ASSIGN giRows = 0.
+    glcCsv = csvHeader() + CHR(13) + CHR(10).
+    RUN walkMenu (INPUT tt-export.menu_obj, INPUT 1).
+
+    cOut = cDir + "menu_":U + safeToken(tt-export.menu_code) + "_":U + cStamp + ".csv":U.
+    IF CAN-FIND(FIRST bTaken WHERE bTaken.cOutFile = cOut) THEN
+      cOut = cDir + "menu_":U + safeToken(tt-export.menu_code) + "_":U
+           + fmtObj(tt-export.menu_obj) + "_":U + cStamp + ".csv":U.
+    ASSIGN tt-export.cOutFile = cOut.
+
+    RUN writeUtf8File (INPUT cOut, INPUT glcCsv).
+    IF gcFail <> "":U THEN
+      RETURN ERROR gcFail.
+
+    FILE-INFO:FILE-NAME = cOut.
+    IF FILE-INFO:FULL-PATHNAME = ? THEN
+      RETURN ERROR "The CSV was not created: " + cOut.
+
+    ASSIGN
+      cOut            = FILE-INFO:FULL-PATHNAME
+      tt-export.iRows = giRows
+      giFiles             = giFiles + 1
+      iCount              = iCount + giRows
+      gcWritten           = gcWritten + cOut + " (":U + STRING(giRows) + ")":U + CHR(10).
+  END.
+
+  FILE-INFO:FILE-NAME = RIGHT-TRIM(cDir, CHR(92)).
+  IF FILE-INFO:FULL-PATHNAME <> ? THEN
+    ASSIGN cFile = FILE-INFO:FULL-PATHNAME.
 END PROCEDURE.
 
 PROCEDURE loadMenuXml:
@@ -633,7 +735,7 @@ PROCEDURE writeUtf8File:
 
     COPY-LOB FROM mAll TO FILE pcFile NO-ERROR.
     IF ERROR-STATUS:ERROR THEN
-        gcFail = "Could not create the CSV: "
+        gcFail = "Could not create the CSV. Change Output Directory and run Extract again. "
                + ERROR-STATUS:GET-MESSAGE(1).
 
     SET-SIZE(mBody) = 0.
@@ -703,6 +805,29 @@ FUNCTION fmtObj RETURNS CHARACTER (INPUT pdValue AS DECIMAL):
 /* Menu and object ids are whole numbers in the export. Blank means none. */
     IF pdValue = ? OR pdValue = 0 THEN RETURN "".
     RETURN TRIM(STRING(TRUNCATE(pdValue, 0), ">>>>>>>>>>>>>>>>>9")).
+END FUNCTION.
+
+FUNCTION dirWithSlash RETURNS CHARACTER (INPUT pcDir AS CHARACTER):
+/* Folder with one trailing backslash. A pasted CSV path uses its folder. */
+    DEFINE VARIABLE cDir   AS CHARACTER NO-UNDO.
+    DEFINE VARIABLE cSlash AS CHARACTER NO-UNDO.
+    DEFINE VARIABLE iSlash AS INTEGER   NO-UNDO.
+
+    cSlash = CHR(92).
+    cDir = REPLACE(TRIM(pcDir), CHR(47), cSlash).
+    IF cDir = ? THEN RETURN "".
+    cDir = RIGHT-TRIM(cDir, cSlash).
+    IF cDir = "" THEN RETURN "".
+
+    IF cDir MATCHES "*.csv":U THEN DO:
+        iSlash = R-INDEX(cDir, cSlash).
+        IF iSlash > 1 THEN
+            cDir = SUBSTRING(cDir, 1, iSlash - 1).
+        ELSE
+            RETURN "".
+    END.
+
+    RETURN cDir + cSlash.
 END FUNCTION.
 
 FUNCTION safeToken RETURNS CHARACTER (INPUT pcValue AS CHARACTER):
