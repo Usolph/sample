@@ -833,8 +833,10 @@ END FUNCTION.
 
 FUNCTION outputDirStatus RETURNS CHARACTER
     (INPUT pcDir AS CHARACTER, OUTPUT pcClean AS CHARACTER):
-/* Blank when the folder exists and a file can be created there. Otherwise the reason. */
+/* Blank when the folder exists and a file can be created there. Otherwise the reason.
+   COPY-LOB is used because OUTPUT TO VALUE does not accept NO-ERROR. */
     DEFINE VARIABLE cProbe AS CHARACTER NO-UNDO.
+    DEFINE VARIABLE mProbe AS MEMPTR    NO-UNDO.
 
     ASSIGN pcClean = dirWithSlash(pcDir).
     IF pcClean = "":U THEN
@@ -848,11 +850,15 @@ FUNCTION outputDirStatus RETURNS CHARACTER
     ASSIGN pcClean = dirWithSlash(FILE-INFO:FULL-PATHNAME).
     cProbe = pcClean + "menu_path_check_":U + STRING(ETIME) + ".tmp":U.
 
-    OUTPUT TO VALUE(cProbe) NO-ERROR.
-    IF ERROR-STATUS:ERROR THEN
+    SET-SIZE(mProbe) = 1.
+    PUT-BYTE(mProbe, 1) = 32.
+    COPY-LOB FROM mProbe TO FILE cProbe NO-ERROR.
+    IF ERROR-STATUS:ERROR THEN DO:
+        SET-SIZE(mProbe) = 0.
         RETURN "That folder exists, but a file cannot be created there.".
+    END.
 
-    OUTPUT CLOSE.
+    SET-SIZE(mProbe) = 0.
     OS-DELETE VALUE(cProbe) NO-ERROR.
     RETURN "".
 END FUNCTION.
