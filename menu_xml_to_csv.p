@@ -353,7 +353,6 @@ FUNCTION programPath RETURNS CHARACTER
 
   ENABLE ALL WITH FRAME main-frame.
   DISPLAY cFile cRootMenu WITH FRAME main-frame.
-  FRAME main-frame:DEFAULT-BUTTON = BuExtract:HANDLE IN FRAME main-frame.
 
   WAIT-FOR "GO" OF FRAME main-frame.
 
