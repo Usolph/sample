@@ -19,23 +19,18 @@
 
     Run         : RUN menu_xml_to_csv.p.
 
-    Input       : A dsMIP WRITE-XML export that contains ws_menu (and, when
-                  the menu launches a program, mi_object). Other tables in
-                  the same file are ignored. Illegal XML control characters
-                  outside the menu data are stripped before the read so one
-                  bad character in an unrelated table does not reject the file.
+    Input       : A dsMIP WRITE-XML export. The file is copied into a LONGCHAR
+                  and read with READ-XML into ws_menu and mi_object. A control
+                  character in an unrelated table is replaced first so the
+                  document stays well-formed.
   ----------------------------------------------------------------------*/
 
 DEFINE VARIABLE cXmlFile    AS CHARACTER NO-UNDO FORMAT "x(52)".
 DEFINE VARIABLE cRootMenu   AS CHARACTER NO-UNDO FORMAT "x(40)" INITIAL "eb_Main".
 DEFINE VARIABLE gcFail      AS CHARACTER NO-UNDO.
 DEFINE VARIABLE gcOutFile   AS CHARACTER NO-UNDO.
-DEFINE VARIABLE gcTable     AS CHARACTER NO-UNDO.
-DEFINE VARIABLE gcField     AS CHARACTER NO-UNDO.
-DEFINE VARIABLE gcChars     AS CHARACTER NO-UNDO.
 DEFINE VARIABLE glcCsv      AS LONGCHAR  NO-UNDO.
 DEFINE VARIABLE giRows      AS INTEGER   NO-UNDO.
-DEFINE VARIABLE ghSax       AS HANDLE    NO-UNDO.
 
 DEFINE BUTTON btn_extract LABEL "Extract".
 DEFINE BUTTON btn_browse  LABEL "Browse".
@@ -54,21 +49,107 @@ DEFINE TEMP-TABLE ws_menu NO-UNDO
     FIELD menu_label        AS CHARACTER
     FIELD menu_description  AS CHARACTER
     FIELD menu_attributes   AS CHARACTER
-    FIELD menu_rule_display AS CHARACTER
-    FIELD menu_rule_active  AS CHARACTER
-    FIELD menu_link_type    AS CHARACTER
+    FIELD menu_rule_display        AS CHARACTER
+    FIELD menu_rule_active         AS CHARACTER
+    FIELD menu_rule_format         AS CHARACTER
+    FIELD menu_link_type           AS CHARACTER
+    FIELD menu_expanded            AS CHARACTER
+    FIELD menu_image_set           AS CHARACTER
+    FIELD menu_allow_double_submit AS CHARACTER
     INDEX idx_menu menu_obj
     INDEX idx_parent parent_menu_obj menu_sequence menu_label menu_code
     INDEX idx_code menu_code.
 
 DEFINE TEMP-TABLE mi_object NO-UNDO
-    FIELD object_obj         AS DECIMAL DECIMALS 9
-    FIELD object_code        AS CHARACTER
-    FIELD object_label       AS CHARACTER
-    FIELD object_description AS CHARACTER
-    FIELD object_path        AS CHARACTER
-    FIELD object_filename    AS CHARACTER
+    FIELD object_obj             AS DECIMAL DECIMALS 9
+    FIELD application_key        AS CHARACTER
+    FIELD type_acronym_key       AS CHARACTER
+    FIELD category_key           AS CHARACTER
+    FIELD object_code            AS CHARACTER
+    FIELD object_label           AS CHARACTER
+    FIELD object_description     AS CHARACTER
+    FIELD object_path            AS CHARACTER
+    FIELD object_filename        AS CHARACTER
+    FIELD object_stack           AS CHARACTER
+    FIELD object_attributes      AS CHARACTER
+    FIELD object_remote_url      AS CHARACTER
+    FIELD object_requires_session AS CHARACTER
+    FIELD markdown_help_filename AS CHARACTER
     INDEX idx_obj object_obj.
+
+/* The export also contains these tables. They are loaded so READ-XML can
+   accept the whole dsMIP document. The CSV uses ws_menu and mi_object. */
+DEFINE TEMP-TABLE mi_parameter NO-UNDO
+    FIELD parameter_key              AS CHARACTER
+    FIELD category_key               AS CHARACTER
+    FIELD parameter_code             AS CHARACTER
+    FIELD parameter_label            AS CHARACTER
+    FIELD parameter_description      AS CHARACTER
+    FIELD parameter_default_value    AS CHARACTER
+    FIELD parameter_documentation    AS CHARACTER
+    FIELD preference_search_sequence AS CHARACTER
+    FIELD value_refmaster_namelist   AS CHARACTER
+    FIELD value_format_expression    AS CHARACTER
+    FIELD value_validation_expression AS CHARACTER.
+
+DEFINE TEMP-TABLE mi_message NO-UNDO
+    FIELD message_obj            AS CHARACTER
+    FIELD category_key           AS CHARACTER
+    FIELD message_number         AS CHARACTER
+    FIELD message_type           AS CHARACTER
+    FIELD message_text           AS CHARACTER
+    FIELD message_description    AS CHARACTER
+    FIELD message_help           AS CHARACTER
+    FIELD status_key             AS CHARACTER
+    FIELD language_key           AS CHARACTER
+    FIELD markdown_help_filename AS CHARACTER.
+
+DEFINE TEMP-TABLE mi_category NO-UNDO
+    FIELD category_key           AS CHARACTER
+    FIELD category_structure_key AS CHARACTER
+    FIELD parent_category_key    AS CHARACTER
+    FIELD category_root_type     AS CHARACTER
+    FIELD category_sequence      AS CHARACTER
+    FIELD category_level         AS CHARACTER
+    FIELD category_code          AS CHARACTER
+    FIELD category_label         AS CHARACTER
+    FIELD category_description   AS CHARACTER
+    FIELD category_value         AS CHARACTER
+    FIELD category_rule_active   AS CHARACTER
+    FIELD category_rule_display  AS CHARACTER
+    FIELD category_rule_format   AS CHARACTER
+    FIELD category_wob_namelist  AS CHARACTER
+    FIELD structure_ref_value    AS CHARACTER.
+
+DEFINE TEMP-TABLE mi_preference NO-UNDO
+    FIELD preference_obj         AS CHARACTER
+    FIELD parameter_key          AS CHARACTER
+    FIELD preference_context     AS CHARACTER
+    FIELD owning_entity_mnemonic AS CHARACTER
+    FIELD owning_obj             AS CHARACTER
+    FIELD owning_key             AS CHARACTER
+    FIELD preference_value       AS CHARACTER
+    FIELD effective_from_datetime AS CHARACTER
+    FIELD effective_to_datetime  AS CHARACTER.
+
+DEFINE TEMP-TABLE mi_application NO-UNDO
+    FIELD application_key          AS CHARACTER
+    FIELD status_key               AS CHARACTER
+    FIELD application_code         AS CHARACTER
+    FIELD application_label        AS CHARACTER
+    FIELD application_description  AS CHARACTER
+    FIELD application_tag          AS CHARACTER
+    FIELD application_is_standalone AS CHARACTER.
+
+DEFINE TEMP-TABLE entity_lookup NO-UNDO
+    FIELD entity_mnemonic AS CHARACTER
+    FIELD entity_obj      AS CHARACTER
+    FIELD entity_key      AS CHARACTER
+    FIELD entity_lookup   AS CHARACTER.
+
+DEFINE DATASET dsMIP FOR
+    ws_menu, mi_object, mi_parameter, mi_message, mi_category,
+    mi_preference, mi_application, entity_lookup.
 
 DEFINE TEMP-TABLE tt-visit NO-UNDO
     FIELD menu_obj AS DECIMAL DECIMALS 9
@@ -189,7 +270,6 @@ PROCEDURE runExtract:
     DEFINE INPUT PARAMETER pcXmlFile AS CHARACTER NO-UNDO.
     DEFINE INPUT PARAMETER pcRoot    AS CHARACTER NO-UNDO.
 
-    DEFINE VARIABLE cClean  AS CHARACTER NO-UNDO.
     DEFINE VARIABLE cOut    AS CHARACTER NO-UNDO.
     DEFINE VARIABLE iMenus  AS INTEGER   NO-UNDO.
     DEFINE BUFFER bCount FOR ws_menu.
@@ -219,23 +299,7 @@ PROCEDURE runExtract:
     END.
     pcXmlFile = FILE-INFO:FULL-PATHNAME.
 
-    cClean = tempDirectory()
-           + "menu-xml-clean-"
-           + STRING(YEAR(TODAY), "9999")
-           + STRING(MONTH(TODAY), "99")
-           + STRING(DAY(TODAY), "99")
-           + "-"
-           + STRING(MTIME)
-           + ".xml".
-
-    RUN sanitizeXml (INPUT pcXmlFile, INPUT cClean).
-    IF gcFail <> "" THEN DO:
-        OS-DELETE VALUE(cClean) SILENT.
-        RETURN.
-    END.
-
-    RUN parseXml (INPUT cClean).
-    OS-DELETE VALUE(cClean) SILENT.
+    RUN loadMenuXml (INPUT pcXmlFile).
     IF gcFail <> "" THEN RETURN.
 
     FOR EACH bCount:
@@ -280,69 +344,36 @@ PROCEDURE runExtract:
     gcOutFile = FILE-INFO:FULL-PATHNAME.
 END PROCEDURE.
 
-PROCEDURE sanitizeXml:
-/* Copy the XML, replacing characters XML 1.0 does not allow.
-   The menu export can carry a control character in an unrelated table. */
-    DEFINE INPUT PARAMETER pcSource AS CHARACTER NO-UNDO.
-    DEFINE INPUT PARAMETER pcTarget AS CHARACTER NO-UNDO.
-
-    DEFINE VARIABLE mData AS MEMPTR  NO-UNDO.
-    DEFINE VARIABLE iSize AS INT64   NO-UNDO.
-    DEFINE VARIABLE iPos  AS INT64   NO-UNDO.
-    DEFINE VARIABLE iByte AS INTEGER NO-UNDO.
-
-    COPY-LOB FROM FILE pcSource TO mData NO-ERROR.
-    IF ERROR-STATUS:ERROR THEN DO:
-        gcFail = "Could not read the XML file: " + ERROR-STATUS:GET-MESSAGE(1).
-        SET-SIZE(mData) = 0.
-        RETURN.
-    END.
-
-    iSize = GET-SIZE(mData).
-    DO iPos = 1 TO iSize:
-        iByte = GET-BYTE(mData, iPos).
-        /* Keep tab, LF and CR. Replace every other byte below 32.
-           Bytes 128-255 stay so an ISO-8859-1 export is unchanged. */
-        IF iByte < 32 AND iByte <> 9 AND iByte <> 10 AND iByte <> 13 THEN
-            PUT-BYTE(mData, iPos) = 32.
-    END.
-
-    COPY-LOB FROM mData TO FILE pcTarget NO-ERROR.
-    IF ERROR-STATUS:ERROR THEN
-        gcFail = "Could not prepare the XML for reading: " + ERROR-STATUS:GET-MESSAGE(1).
-
-    SET-SIZE(mData) = 0.
-END PROCEDURE.
-
-PROCEDURE parseXml:
-/* SAX-read ws_menu and mi_object. Every other table in dsMIP is skipped. */
+PROCEDURE loadMenuXml:
+/* Copy the export into a LONGCHAR and READ-XML it into dsMIP. */
     DEFINE INPUT PARAMETER pcFile AS CHARACTER NO-UNDO.
 
-    DEFINE VARIABLE lOk AS LOGICAL NO-UNDO.
+    DEFINE VARIABLE lcXml AS LONGCHAR NO-UNDO.
+    DEFINE VARIABLE iChar AS INTEGER  NO-UNDO.
+    DEFINE VARIABLE lOk   AS LOGICAL  NO-UNDO.
 
-    gcTable = "".
-    gcField = "".
-    gcChars = "".
-
-    IF VALID-HANDLE(ghSax) THEN DELETE OBJECT ghSax.
-    CREATE SAX-READER ghSax.
-    ghSax:HANDLER = THIS-PROCEDURE.
-    ghSax:VALIDATION-ENABLED = FALSE.
-
-    lOk = ghSax:SET-INPUT-SOURCE("FILE", pcFile) NO-ERROR.
-    IF lOk <> TRUE OR ERROR-STATUS:ERROR THEN DO:
-        gcFail = "Could not open the XML.".
+    COPY-LOB FROM FILE pcFile TO lcXml NO-ERROR.
+    IF ERROR-STATUS:ERROR OR lcXml = ? THEN DO:
+        gcFail = "Could not read the XML file.".
         IF ERROR-STATUS:NUM-MESSAGES > 0 THEN
             gcFail = gcFail + " " + ERROR-STATUS:GET-MESSAGE(1).
-        DELETE OBJECT ghSax.
         RETURN.
     END.
 
-    ghSax:SAX-PARSE() NO-ERROR.
-    IF gcFail = "" AND ERROR-STATUS:ERROR THEN
-        gcFail = ERROR-STATUS:GET-MESSAGE(1).
+    /* This export can contain a control character outside the menu tables.
+       XML 1.0 allows only tab, LF and CR below space. */
+    DO iChar = 1 TO 31:
+        IF iChar = 9 OR iChar = 10 OR iChar = 13 THEN NEXT.
+        IF INDEX(lcXml, CHR(iChar)) > 0 THEN
+            lcXml = REPLACE(lcXml, CHR(iChar), " ").
+    END.
 
-    DELETE OBJECT ghSax NO-ERROR.
+    lOk = DATASET dsMIP:READ-XML("LONGCHAR", lcXml, "EMPTY", ?, ?, ?, ?) NO-ERROR.
+    IF lOk <> TRUE OR ERROR-STATUS:ERROR THEN DO:
+        gcFail = "Could not read the menu XML.".
+        IF ERROR-STATUS:NUM-MESSAGES > 0 THEN
+            gcFail = gcFail + " " + ERROR-STATUS:GET-MESSAGE(1).
+    END.
 END PROCEDURE.
 
 PROCEDURE writeTree:
@@ -567,137 +598,6 @@ PROCEDURE writeUtf8File:
 
     SET-SIZE(mBody) = 0.
     SET-SIZE(mAll) = 0.
-END PROCEDURE.
-
-/*------------------------------------------------------------------------
-    SAX callbacks. The handler is THIS-PROCEDURE.
-  ----------------------------------------------------------------------*/
-
-PROCEDURE StartElement:
-    DEFINE INPUT PARAMETER pcNamespace AS CHARACTER NO-UNDO.
-    DEFINE INPUT PARAMETER pcLocal     AS CHARACTER NO-UNDO.
-    DEFINE INPUT PARAMETER pcQName     AS CHARACTER NO-UNDO.
-    DEFINE INPUT PARAMETER phAttrs     AS HANDLE    NO-UNDO.
-
-    IF pcLocal = "" THEN pcLocal = pcQName.
-    IF INDEX(pcLocal, ":") > 0 THEN
-        pcLocal = ENTRY(NUM-ENTRIES(pcLocal, ":"), pcLocal, ":").
-
-    IF pcLocal = "ws_menu" OR pcLocal = "mi_object" THEN DO:
-        gcTable = pcLocal.
-        gcField = "".
-        gcChars = "".
-        IF pcLocal = "ws_menu" THEN CREATE ws_menu.
-        ELSE CREATE mi_object.
-        RETURN.
-    END.
-
-    IF gcTable <> "" THEN
-        ASSIGN
-            gcField = pcLocal
-            gcChars = "".
-END PROCEDURE.
-
-PROCEDURE Characters:
-    DEFINE INPUT PARAMETER charData AS MEMPTR  NO-UNDO.
-    DEFINE INPUT PARAMETER numChars AS INTEGER NO-UNDO.
-
-    IF gcField = "" OR numChars < 1 THEN RETURN.
-
-    /* Position 1 stops at the parser's null terminator and does not include it. */
-    gcChars = gcChars + GET-STRING(charData, 1).
-END PROCEDURE.
-
-PROCEDURE EndElement:
-    DEFINE INPUT PARAMETER pcNamespace AS CHARACTER NO-UNDO.
-    DEFINE INPUT PARAMETER pcLocal     AS CHARACTER NO-UNDO.
-    DEFINE INPUT PARAMETER pcQName     AS CHARACTER NO-UNDO.
-
-    IF pcLocal = "" THEN pcLocal = pcQName.
-    IF INDEX(pcLocal, ":") > 0 THEN
-        pcLocal = ENTRY(NUM-ENTRIES(pcLocal, ":"), pcLocal, ":").
-
-    IF pcLocal = gcTable THEN DO:
-        ASSIGN
-            gcTable = ""
-            gcField = ""
-            gcChars = "".
-        RETURN.
-    END.
-
-    IF gcTable <> "" AND pcLocal = gcField THEN DO:
-        RUN assignField (INPUT gcTable, INPUT gcField, INPUT gcChars).
-        ASSIGN
-            gcField = ""
-            gcChars = "".
-    END.
-END PROCEDURE.
-
-PROCEDURE FatalError:
-    DEFINE INPUT PARAMETER pcMessage AS CHARACTER NO-UNDO.
-
-    IF gcFail = "" THEN gcFail = pcMessage.
-    IF VALID-HANDLE(ghSax)
-       AND VALID-HANDLE(ghSax:LOCATOR)
-       AND ghSax:LOCATOR:LINE-NUMBER > 0
-       AND INDEX(gcFail, "Line ") = 0 THEN
-        gcFail = gcFail + " Line " + STRING(ghSax:LOCATOR:LINE-NUMBER) + ".".
-END PROCEDURE.
-
-PROCEDURE assignField:
-/* Store one XML field on the ws_menu or mi_object row just created. */
-    DEFINE INPUT PARAMETER pcTable AS CHARACTER NO-UNDO.
-    DEFINE INPUT PARAMETER pcField AS CHARACTER NO-UNDO.
-    DEFINE INPUT PARAMETER pcValue AS CHARACTER NO-UNDO.
-
-    DEFINE VARIABLE hBuf  AS HANDLE  NO-UNDO.
-    DEFINE VARIABLE hFld  AS HANDLE  NO-UNDO.
-    DEFINE VARIABLE iFld  AS INTEGER NO-UNDO.
-    DEFINE VARIABLE cNum  AS CHARACTER NO-UNDO.
-
-    IF pcTable = "ws_menu" THEN hBuf = BUFFER ws_menu:HANDLE.
-    ELSE hBuf = BUFFER mi_object:HANDLE.
-
-    DO iFld = 1 TO hBuf:NUM-FIELDS:
-        IF hBuf:BUFFER-FIELD(iFld):NAME = pcField THEN DO:
-            hFld = hBuf:BUFFER-FIELD(iFld).
-            LEAVE.
-        END.
-    END.
-    IF NOT VALID-HANDLE(hFld) THEN RETURN.
-
-    pcValue = TRIM(pcValue).
-
-    CASE hFld:DATA-TYPE:
-        WHEN "INTEGER" OR WHEN "INT64" THEN DO:
-            IF pcValue = "" THEN hFld:BUFFER-VALUE = 0.
-            ELSE DO:
-                hFld:BUFFER-VALUE = INT64(pcValue) NO-ERROR.
-                IF ERROR-STATUS:ERROR THEN DO:
-                    gcFail = "Could not read " + pcTable + "." + pcField
-                           + " value '" + pcValue + "'.".
-                    IF VALID-HANDLE(ghSax) THEN ghSax:STOP-PARSING().
-                END.
-            END.
-        END.
-        WHEN "DECIMAL" THEN DO:
-            IF pcValue = "" THEN hFld:BUFFER-VALUE = 0.
-            ELSE DO:
-                /* XML decimals always use '.'. European sessions expect ','. */
-                cNum = pcValue.
-                IF SESSION:NUMERIC-FORMAT = "EUROPEAN" THEN
-                    cNum = REPLACE(cNum, ".", ",").
-                hFld:BUFFER-VALUE = DECIMAL(cNum) NO-ERROR.
-                IF ERROR-STATUS:ERROR THEN DO:
-                    gcFail = "Could not read " + pcTable + "." + pcField
-                           + " value '" + pcValue + "'.".
-                    IF VALID-HANDLE(ghSax) THEN ghSax:STOP-PARSING().
-                END.
-            END.
-        END.
-        OTHERWISE
-            hFld:BUFFER-VALUE = pcValue.
-    END CASE.
 END PROCEDURE.
 
 /*------------------------------------------------------------------------
